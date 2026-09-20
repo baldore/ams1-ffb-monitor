@@ -1,0 +1,12 @@
+# Build artifact: realfeel-overlay.ps1 rebuilds the exe whenever the script is newer.
+*.exe
+*.pdb
+
+# Captures from tools/shoot-running.ps1
+*.png
+
+# rotation-watcher.exe writes here
+*.log
+
+# MOZA SDK binaries (no licence shipped with the SDK; see README for the source)
+lib/
