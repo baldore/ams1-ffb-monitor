@@ -1,6 +1,9 @@
 <#
 .SYNOPSIS
-  Sets the MOZA wheelbase rotation to match the car in Automobilista 1.
+  Maintenance tool for the MOZA wheelbase rotation: read it, or put it back.
+
+  The watching itself lives in realfeel-overlay.ps1 - one app, one
+  implementation. This is only -Probe and -Restore.
 
 .DESCRIPTION
   AMS writes the current car's rotation into the PROFILE Controller.ini as
@@ -9,14 +12,11 @@
   That is the game's own computed value for the car, so no .hdv parsing or
   steering-ratio maths is needed.
 
-  The same file is rewritten every few seconds with identical content, so this
-  triggers on the VALUE changing, never on the modification time.
-
-  MOZA's setMotorLimitAngle(limitAngle, gameMaximumAngle) takes two numbers and
-  requires gameMaximumAngle <= limitAngle. The per-car value goes into
-  gameMaximumAngle. limitAngle is raised once to -MaxLimit so it stops being a
-  ceiling (a base left at 450 would silently clamp a 540 car); the original is
-  saved to rotation-watcher-state.json and -Restore puts it back.
+  MOZA's setMotorLimitAngle(limitAngle, gameMaximumAngle) requires
+  gameMaximumAngle <= limitAngle, so the overlay raises limitAngle once to stop
+  it being a ceiling (a base left at 450 would silently clamp a 540 car). It
+  records the original in rotation-watcher-state.json on first connect, and
+  -Restore here writes that back.
 
   MOZA's own example calls setMotorLimitAngle(150,200), which violates their
   documented constraint, so every write is read back and verified.
@@ -24,11 +24,7 @@
   Needs lib\moza\{MOZA_API_CSharp,MOZA_API_C,MOZA_SDK}.dll - see README.
 
 .EXAMPLE
-  .\rotation-watcher.ps1 -Probe      # read the base and exit, no writes
-.EXAMPLE
-  .\rotation-watcher.ps1 -DryRun     # watch and log, never write
-.EXAMPLE
-  .\rotation-watcher.ps1             # the real thing
+  .\rotation-watcher.ps1 -Probe      # read the base and the car value, no writes
 .EXAMPLE
   .\rotation-watcher.ps1 -Restore    # put the base back as it was
 #>
@@ -36,14 +32,8 @@
 param(
     [string]$ProfileIni = 'C:\Users\acorn\OneDrive\Documents\Automobilista\userdata\Orregoso\Controller.ini',
     [string]$LibPath,
-    [int]$PollMs = 1000,
-
-    # limitAngle is raised to this once so per-car values are never clamped.
-    # The SDK documents 90-2000 for the setter.
-    [int]$MaxLimit = 2000,
 
     [switch]$Probe,
-    [switch]$DryRun,
     [switch]$Restore
 )
 
@@ -175,71 +165,7 @@ if ($Restore) {
     exit 0
 }
 
-# --- watch --------------------------------------------------------------------
-
-$mode = ''
-if ($DryRun) { $mode = ' (dry run)' }
-Write-Log ("starting{0} - profile: {1}" -f $mode, $ProfileIni)
-
-$base = Connect-Base
-if (-not $base) { exit 1 }
-Write-Log ("base on connect: limitAngle={0} gameMaximumAngle={1}" -f $base.Limit, $base.GameMax)
-
-# Remember the original exactly once, so -Restore stays truthful across restarts.
-if (-not (Test-Path $StateFile)) {
-    @{ OrigLimit = $base.Limit; OrigGameMax = $base.GameMax; Saved = (Get-Date -Format 's') } |
-        ConvertTo-Json | Set-Content -Path $StateFile -Encoding utf8
-    Write-Log "saved original base settings to $(Split-Path $StateFile -Leaf)"
-}
-
-$limit = $base.Limit
-if ($limit -lt $MaxLimit) {
-    if ($DryRun) {
-        Write-Log "would raise limitAngle $limit -> $MaxLimit (dry run)"
-        $limit = $MaxLimit
-    } elseif (Set-Base -Limit $MaxLimit -GameMax $base.GameMax) {
-        Write-Log "raised limitAngle $limit -> $MaxLimit so per-car values are never clamped"
-        $limit = $MaxLimit
-    } else {
-        Write-Log "could not raise limitAngle, staying at $limit - larger cars will clamp" 'warn'
-    }
-}
-
-$applied = -1
-$amsSeen = $false
-
-# finally, so Ctrl+C or a kill still releases the SDK's global manager. Leaving
-# it held makes the next run sit in the NODEVICES state far longer.
-try {
-    while ($true) {
-        $ams = @(Get-Process -Name AMS -ErrorAction SilentlyContinue)
-        if ($ams.Count -eq 0) {
-            if ($amsSeen) { Write-Log 'AMS closed - idling'; $amsSeen = $false; $applied = -1 }
-            Start-Sleep -Milliseconds $PollMs
-            continue
-        }
-        if (-not $amsSeen) { Write-Log 'AMS running - watching for car changes'; $amsSeen = $true }
-
-        $range = Get-CarRange $ProfileIni
-        if ($range -gt 0 -and $range -ne $applied) {
-            $target = [Math]::Min($range, $limit)
-            if ($target -lt 90) { $target = 90 }
-            if ($target -ne $range) { Write-Log "car wants $range but limitAngle is $limit - clamping to $target" 'warn' }
-
-            if ($DryRun) {
-                Write-Log "would set gameMaximumAngle -> $target (car range $range)"
-                $applied = $range
-            } elseif (Set-Base -Limit $limit -GameMax $target) {
-                Write-Log "car range $range -> base gameMaximumAngle $target  (verified)"
-                $applied = $range
-            } else {
-                Write-Log "failed to apply $target - will retry" 'warn'
-            }
-        }
-        Start-Sleep -Milliseconds $PollMs
-    }
-}
-finally {
-    Write-Log 'releasing SDK'
-    try { [mozaAPI.mozaAPI]::removeMozaSDK() } catch { }
-}
+Write-Log "nothing to do - the watching lives in realfeel-overlay.ps1 now." 'warn'
+Write-Log "use -Probe to read the base, or -Restore to put it back."
+try { [mozaAPI.mozaAPI]::removeMozaSDK() } catch { }
+exit 1

@@ -79,39 +79,50 @@ entrada inyectada. Todo lo demas esta probado contra `tools/fake-realfeel.ps1`.
 
 `-SelfTest` lee cinco muestras, las parsea e imprime, sin construir el exe.
 
-## rotation-watcher.ps1 (rotacion automatica de la MOZA)
+## Rotacion de la MOZA segun el coche
 
-Pone el rango de giro de la base al del coche. El valor sale de
-`Steering Wheel Range` del `Controller.ini` del PERFIL: es el numero que
-calcula el propio juego para el coche actual, ya en grados tope a tope, y lo
-reescribe en vivo al cambiar de coche (visto 540 -> 450). El fichero se
+Va integrado en el overlay: una sola aplicacion. Muestra dos filas nuevas,
+`Car rotation` (lo que pide el coche) y `Base rotation` (gameMaximumAngle /
+limitAngle de la base), y pone la base a lo que pide el coche.
+
+El valor sale de `Steering Wheel Range` del `Controller.ini` del PERFIL: es lo
+que calcula el propio juego para el coche actual, ya en grados tope a tope, y
+lo reescribe en vivo al cambiar de coche (visto 540 -> 450). Ese fichero se
 reescribe cada pocos segundos con el mismo contenido, asi que se dispara por
-CAMBIO DE VALOR, nunca por fecha de modificacion.
+CAMBIO DE VALOR, nunca por fecha.
 
-Necesita las DLL del SDK de MOZA en `lib\moza\` (no se versionan, sin licencia
-en el zip): `MOZA_API_CSharp.dll`, `MOZA_API_C.dll`, `MOZA_SDK.dll`, de
-`SDK_CSharp\x64\` dentro de `MOZA_SDK.zip`
-(mozaracing.com/pages/sdk -> cdn.gudsen.vip, 54,5 MB).
+Necesita las DLL del SDK de MOZA en `lib\moza\` (no se versionan, el zip no
+trae licencia): `MOZA_API_CSharp.dll`, `MOZA_API_C.dll`, `MOZA_SDK.dll`, de
+`SDK_CSharp\x64\` dentro de `MOZA_SDK.zip` (mozaracing.com/pages/sdk ->
+cdn.gudsen.vip, 54,5 MB).
+
+El SDK se llama por REFLEXION a proposito: con una referencia en tiempo de
+compilacion, faltar una DLL tumbaria la compilacion del overlay entero y se
+perderia el monitor de FFB por un extra opcional. Si faltan, la rotacion se
+desactiva y se ve el motivo en pantalla.
 
     setMotorLimitAngle(limitAngle, gameMaximumAngle)
       limitAngle        limite de la base,  90-2000
       gameMaximumAngle  rango del juego,    90-limitAngle
 
-Solo se toca `gameMaximumAngle`; `limitAngle` se deja como este. El ejemplo
-oficial de MOZA llama a `setMotorLimitAngle(150,200)`, que viola su propia
-restriccion documentada, asi que siempre se relee despues de escribir.
-
-    -Probe     solo lee y muestra los angulos de la base, no escribe
-    -DryRun    vigila y registra, sin escribir nunca
-
-    -Restore   devuelve la base a lo que habia antes
-
-El original se guarda una sola vez en `rotation-watcher-state.json` (no se
-versiona). `limitAngle` se sube a 2000 al arrancar para que ningun coche se
-quede recortado: con la base en 450, un coche de 540 se habria aplicado como
-450 sin avisar.
+`limitAngle` se sube una vez a `-MaxLimit` (2000) porque `gameMaximumAngle` no
+puede pasarse de el: con la base en 450, un coche de 540 se habria aplicado
+como 450 sin avisar. El original se guarda en `rotation-watcher-state.json` al
+conectar por primera vez.
 
 La base pasa por tres estados al conectar: `NODEVICES`, luego `NORMAL` con
-ceros, y por fin `NORMAL` con el valor bueno. El estado intermedio miente, asi
-que solo se acepta una lectura de 90 grados o mas (el minimo que documenta el
-SDK). Tarda unos 3 segundos.
+ceros, y por fin `NORMAL` con el valor bueno. El intermedio miente, asi que
+solo se acepta una lectura de 90 grados o mas (el minimo que documenta el SDK).
+Tarda unos 3 segundos. Toda escritura se relee y se verifica, porque el ejemplo
+oficial de MOZA llama a `setMotorLimitAngle(150,200)`, que viola su propia
+restriccion documentada.
+
+    -RotationDryRun   muestra las filas pero no escribe nunca en la base
+    -NoRotation       desactiva la rotacion; el monitor de FFB no se entera
+    -ProfileIni       Controller.ini del perfil
+    -MozaLib          carpeta de las DLL (por defecto lib\moza)
+    -MaxLimit 2000    hasta donde se sube limitAngle
+
+`rotation-watcher.ps1` es solo mantenimiento: `-Probe` lee la base y el valor
+del coche, `-Restore` devuelve la base a como estaba. Vigilar ya no es cosa
+suya.

@@ -60,6 +60,23 @@ param(
     # can be swept for every clipping point rather than only the first.
     [int]$ClipHoldSeconds = 4,
 
+    # --- MOZA wheel rotation ------------------------------------------------
+    # Profile Controller.ini AMS writes the car's rotation into.
+    [string]$ProfileIni = 'C:\Users\acorn\OneDrive\Documents\Automobilista\userdata\Orregoso\Controller.ini',
+
+    # Folder holding MOZA_API_CSharp.dll, MOZA_API_C.dll and MOZA_SDK.dll.
+    [string]$MozaLib,
+
+    # limitAngle is raised to this once so per-car values are never clamped.
+    [int]$MaxLimit = 2000,
+    [int]$RotationPollMs = 1000,
+
+    # Show the rotation rows but never write to the base.
+    [switch]$RotationDryRun,
+
+    # Turn rotation control off entirely; the FFB monitor is unaffected.
+    [switch]$NoRotation,
+
     # How long a probed key is held down. RealFeel polls with GetKeyState
     # roughly every 100ms, so the key must stay down longer than that or the
     # poll can miss it entirely.
@@ -92,8 +109,10 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
 
@@ -392,9 +411,207 @@ public class RfKeys {
     }
 }
 
+// Keeps the MOZA wheelbase rotation matched to the car, and exposes a snapshot
+// for the overlay to draw.
+//
+// AMS writes the car's rotation into the profile Controller.ini as "Steering
+// Wheel Range", full lock-to-lock, within seconds of a car change. The same
+// file is rewritten every few seconds with identical content, so this fires on
+// the VALUE changing, never on the timestamp.
+//
+// The SDK is called by REFLECTION on purpose: a compile-time reference would
+// make the whole overlay fail to build when the MOZA DLLs are absent or moved,
+// which would take the FFB monitor down over an optional extra. Missing DLLs
+// here just disable rotation and leave a note on screen.
+public class RfRotation {
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern bool SetDllDirectoryW(string p);
+
+    readonly string iniPath, libPath, statePath;
+    readonly int    maxLimit, pollMs;
+    readonly bool   dryRun;
+
+    Thread worker;
+    volatile bool stopping;
+
+    // SDK entry points, resolved once at startup.
+    object   sdkType;   // System.Type for mozaAPI.mozaAPI
+    Type     errType;   // mozaAPI.ERRORCODE
+    MethodInfo miInstall, miRemove, miGet, miSet;
+
+    readonly object gate = new object();
+    bool   connected = false;
+    int    baseLimit = 0, baseGameMax = 0, carRange = 0;
+    string status = "starting";
+
+    public RfRotation(string iniPath, string libPath, int maxLimit, int pollMs, bool dryRun, string statePath) {
+        this.iniPath   = iniPath;
+        this.libPath   = libPath;
+        this.maxLimit  = maxLimit;
+        this.pollMs    = pollMs;
+        this.dryRun    = dryRun;
+        this.statePath = statePath;
+    }
+
+    // Record what the base looked like before we touched it, once, so
+    // rotation-watcher.ps1 -Restore has something truthful to write back.
+    void SaveOriginal(int limit, int gameMax) {
+        try {
+            if (statePath.Length == 0 || File.Exists(statePath)) return;
+            File.WriteAllText(statePath, string.Format(
+                "{{\r\n    \"Saved\":  \"{0}\",\r\n    \"OrigGameMax\":  {1},\r\n    \"OrigLimit\":  {2}\r\n}}\r\n",
+                DateTime.Now.ToString("s"), gameMax, limit));
+        } catch { }
+    }
+
+    public void Snapshot(out bool conn, out int limit, out int gameMax, out int car, out string st) {
+        lock (gate) { conn = connected; limit = baseLimit; gameMax = baseGameMax; car = carRange; st = status; }
+    }
+    void SetStatus(string s) { lock (gate) { status = s; } }
+
+    public void Start() {
+        worker = new Thread(Run);
+        worker.IsBackground = true;
+        worker.Start();
+    }
+    public void Stop() {
+        stopping = true;
+        try { if (miRemove != null) miRemove.Invoke(null, null); } catch { }
+    }
+
+    bool LoadSdk() {
+        try {
+            string dll = Path.Combine(libPath, "MOZA_API_CSharp.dll");
+            if (!File.Exists(dll)) { SetStatus("no SDK in lib\\moza"); return false; }
+            SetDllDirectoryW(libPath);                       // for the native halves
+            Assembly asm = Assembly.LoadFrom(dll);
+            Type t  = asm.GetType("mozaAPI.mozaAPI");
+            errType = asm.GetType("mozaAPI.ERRORCODE");
+            if (t == null || errType == null) { SetStatus("SDK types not found"); return false; }
+            sdkType   = t;
+            miInstall = t.GetMethod("installMozaSDK");
+            miRemove  = t.GetMethod("removeMozaSDK");
+            miGet     = t.GetMethod("getMotorLimitAngle");
+            miSet     = t.GetMethod("setMotorLimitAngle");
+            if (miInstall == null || miGet == null || miSet == null) { SetStatus("SDK methods not found"); return false; }
+            return true;
+        } catch (Exception ex) {
+            SetStatus("SDK load failed: " + ex.GetType().Name);
+            return false;
+        }
+    }
+
+    // The base comes up through three states: NODEVICES, then NORMAL with
+    // zeros, then NORMAL with the real value. The middle one lies, so anything
+    // under the SDK's documented 90 degree minimum is not a real reading.
+    bool TryRead(out int limit, out int gameMax) {
+        limit = 0; gameMax = 0;
+        try {
+            // Sentinel rather than NORMAL: if the call never writes the ref,
+            // a pre-set NORMAL would look like success.
+            object err = Enum.Parse(errType, "PARAMETERERR");
+            object[] args = new object[] { err };
+            object res = miGet.Invoke(null, args);
+            if (args[0] == null || args[0].ToString() != "NORMAL" || res == null) return false;
+            Type tt = res.GetType();
+            limit   = (int)tt.GetProperty("Item1").GetValue(res, null);
+            gameMax = (int)tt.GetProperty("Item2").GetValue(res, null);
+            return limit >= 90 && gameMax >= 90;
+        } catch { return false; }
+    }
+
+    bool TryWrite(int limit, int gameMax) {
+        try {
+            object err = miSet.Invoke(null, new object[] { limit, gameMax });
+            if (err == null || err.ToString() != "NORMAL") { SetStatus("set failed: " + err); return false; }
+        } catch (Exception ex) { SetStatus("set threw: " + ex.GetType().Name); return false; }
+
+        // MOZA's own sample calls setMotorLimitAngle(150,200), which breaks
+        // their documented constraint, so trust only the read-back.
+        Thread.Sleep(300);
+        int l, g;
+        for (int i = 0; i < 5 && !stopping; i++) {
+            if (TryRead(out l, out g)) {
+                if (l == limit && g == gameMax) { lock (gate) { baseLimit = l; baseGameMax = g; } return true; }
+                SetStatus(string.Format("read-back {0}/{1}, asked {2}/{3}", l, g, limit, gameMax));
+                return false;
+            }
+            Thread.Sleep(300);
+        }
+        SetStatus("read-back failed");
+        return false;
+    }
+
+    public static int ReadCarRange(string path) {
+        try {
+            if (!File.Exists(path)) return 0;
+            foreach (string raw in File.ReadAllLines(path)) {
+                if (!raw.StartsWith("Steering Wheel Range=")) continue;
+                int a = raw.IndexOf('"'), b = raw.IndexOf('"', a + 1);
+                if (a < 0 || b < 0) return 0;
+                int v;
+                if (int.TryParse(raw.Substring(a + 1, b - a - 1), out v)) return v;
+                return 0;
+            }
+        } catch { }
+        return 0;
+    }
+
+    void Run() {
+        if (!LoadSdk()) return;
+
+        try { miInstall.Invoke(null, null); } catch (Exception ex) { SetStatus("install failed: " + ex.GetType().Name); return; }
+
+        SetStatus("connecting");
+        int limit = 0, gameMax = 0;
+        DateTime deadline = DateTime.UtcNow.AddSeconds(30);
+        while (!stopping && DateTime.UtcNow < deadline) {
+            if (TryRead(out limit, out gameMax)) break;
+            Thread.Sleep(500);
+        }
+        if (stopping) return;
+        if (limit < 90) { SetStatus("base not found"); return; }
+
+        lock (gate) { connected = true; baseLimit = limit; baseGameMax = gameMax; }
+        SaveOriginal(limit, gameMax);
+        SetStatus(dryRun ? "dry run" : "ready");
+
+        // gameMaximumAngle can never exceed limitAngle, so lift the ceiling
+        // once; a base left at 450 would clamp a 540 car silently.
+        if (limit < maxLimit) {
+            if (dryRun) { SetStatus("dry run (would raise limit)"); limit = maxLimit; }
+            else if (TryWrite(maxLimit, gameMax)) { limit = maxLimit; SetStatus("ready"); }
+            else SetStatus("limit stuck at " + limit);
+        }
+
+        int applied = -1;
+        while (!stopping) {
+            bool amsUp = Process.GetProcessesByName("AMS").Length > 0;
+            int range = ReadCarRange(iniPath);
+            lock (gate) { carRange = range; }
+
+            if (amsUp && range > 0 && range != applied) {
+                int target = Math.Min(range, limit);
+                if (target < 90) target = 90;
+                if (dryRun) {
+                    SetStatus(string.Format("dry run: would set {0}", target));
+                    applied = range;
+                } else if (TryWrite(limit, target)) {
+                    SetStatus(target == range ? "ready" : "clamped to " + target);
+                    applied = range;
+                }
+            }
+            if (!amsUp) applied = -1;
+            Thread.Sleep(pollMs);
+        }
+    }
+}
+
 public class RfOverlay : Form {
     readonly RfReader reader = new RfReader();
-    readonly Timer timer = new Timer();
+    // Qualified: System.Threading is imported for the rotation worker, which
+    // makes a bare Timer ambiguous.
+    readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
     readonly Label body = new Label();
     readonly Label peak = new Label();
     readonly Label status = new Label();
@@ -403,6 +620,7 @@ public class RfOverlay : Form {
     readonly int testPid;
     readonly int holdMs;
     readonly int clipHoldMs;
+    readonly RfRotation rotation;     // null when rotation control is off
     Dictionary<int, string> carsByForce = new Dictionary<int, string>();
 
     int  peakPct = 0;
@@ -428,8 +646,8 @@ public class RfOverlay : Form {
     Button toggleBtn = null;
     bool controlsShown = false;          // hidden by default
     const int ControlsHeight = 124;
-    const int ToggleTop = 380;           // just under the status text
-    const int PanelTop  = 408;           // controls hang below the toggle
+    const int ToggleTop = 436;           // just under the status text
+    const int PanelTop  = 464;           // controls hang below the toggle
     RfSample lastSample = null;
     RfSample probeBefore = null;
     string probeKeyName = null;
@@ -449,11 +667,12 @@ public class RfOverlay : Form {
         }
     }
 
-    public RfOverlay(int clipThreshold, int pollMs, int testPid, string iniPath, int holdMs, bool startExpanded, int clipHoldMs) {
+    public RfOverlay(int clipThreshold, int pollMs, int testPid, string iniPath, int holdMs, bool startExpanded, int clipHoldMs, RfRotation rotation) {
         this.clipThreshold = clipThreshold;
         this.testPid = testPid;
         this.holdMs = holdMs;
         this.clipHoldMs = clipHoldMs;
+        this.rotation = rotation;
         try { carsByForce = RfParser.CarsByForce(iniPath); } catch { }
 
         FormBorderStyle = FormBorderStyle.None;
@@ -519,21 +738,21 @@ public class RfOverlay : Form {
         body.ForeColor = Color.Gainsboro;
         body.AutoSize  = false;
         body.Location  = new Point(12, 30);
-        body.Size      = new Size(396, 240);
+        body.Size      = new Size(396, 296);   // 13 base rows + the rotation block
 
         // 15pt, not 17: with the HOLD countdown appended the line reaches 33
         // characters, which wrapped into the status text at the larger size.
         peak.Font      = new Font("Consolas", 15f, FontStyle.Bold);
         peak.ForeColor = Color.LimeGreen;
         peak.AutoSize  = false;
-        peak.Location  = new Point(12, 274);
+        peak.Location  = new Point(12, 330);
         peak.Size      = new Size(396, 34);
         peak.TextAlign = ContentAlignment.MiddleLeft;
 
         status.Font      = small;
         status.ForeColor = Color.DimGray;
         status.AutoSize  = false;
-        status.Location  = new Point(12, 314);
+        status.Location  = new Point(12, 370);
         status.Size      = new Size(396, 60);
 
         Controls.Add(probeResult);
@@ -739,6 +958,25 @@ public class RfOverlay : Form {
         return label.PadRight(20) + value.PadLeft(12);
     }
 
+    // Wheel rotation: what the car asks for, and what the base is actually set
+    // to. They should converge a second or so after a car change.
+    void AppendRotation(StringBuilder sb) {
+        if (rotation == null) return;
+        bool conn; int limit, gameMax, car; string st;
+        rotation.Snapshot(out conn, out limit, out gameMax, out car, out st);
+
+        sb.AppendLine(new string('-', 32));
+        sb.AppendLine(Row("Car rotation", car > 0 ? car + " deg" : "-"));
+        if (conn) {
+            sb.AppendLine(Row("Base rotation", gameMax + " / " + limit));
+            // Free-form and often longer than Row's 12 character value column,
+            // so left-align it instead of padding it ragged.
+            if (st != "ready") sb.AppendLine("Rotation: " + st);
+        } else {
+            sb.AppendLine("Base rotation: " + st);
+        }
+    }
+
     // Name from the console if we caught it, otherwise inferred from the ini
     // and marked with "?" so a guess is never mistaken for a fact.
     string CarLabel(RfSample s) {
@@ -781,6 +1019,7 @@ public class RfOverlay : Form {
         var ci = System.Globalization.CultureInfo.InvariantCulture;
         sb.AppendLine(Row("Front grip L / R",  s.GripL.ToString("0.00", ci) + " / " + s.GripR.ToString("0.00", ci)));
         sb.AppendLine(Row("Front grip effect", s.GripEffect.ToString("0.0", ci)));
+        AppendRotation(sb);
         body.Text = sb.ToString();
 
         string held = "";
@@ -802,6 +1041,7 @@ public class RfOverlay : Form {
     protected override void OnFormClosed(FormClosedEventArgs e) {
         timer.Stop();
         reader.Detach();
+        if (rotation != null) rotation.Stop();   // releases the SDK's manager
         base.OnFormClosed(e);
     }
 }
@@ -832,8 +1072,24 @@ public static class RfMain {
         string corner = ArgStr(args, "--corner", "TopRight");
         string ini    = ArgStr(args, "--ini", "");
 
+        string prof    = ArgStr(args, "--profile", "");
+        string mozalib = ArgStr(args, "--mozalib", "");
+        int    maxlim  = ArgInt(args, "--maxlimit", 2000);
+        int    rotpoll = ArgInt(args, "--rotpoll", 1000);
+        int    norot   = ArgInt(args, "--norotation", 0);
+        int    rotdry  = ArgInt(args, "--rotdryrun", 0);
+        string statef  = ArgStr(args, "--statefile", "");
+
+        // Rotation is optional: without a profile or the SDK the overlay is
+        // still a working FFB monitor, just without the two rotation rows.
+        RfRotation rot = null;
+        if (norot == 0 && prof.Length > 0 && mozalib.Length > 0) {
+            rot = new RfRotation(prof, mozalib, maxlim, rotpoll, rotdry != 0, statef);
+            rot.Start();
+        }
+
         Application.EnableVisualStyles();
-        var f = new RfOverlay(clip, poll, tpid, ini, hold, expand != 0, cliphold);
+        var f = new RfOverlay(clip, poll, tpid, ini, hold, expand != 0, cliphold, rot);
 
         var area = Screen.PrimaryScreen.WorkingArea;
         int x, y;
@@ -852,6 +1108,8 @@ public static class RfMain {
 '@
 
 $iniPath = $IniPath
+if (-not $MozaLib) { $MozaLib = Join-Path $PSScriptRoot 'lib\moza' }
+$mozaLib = $MozaLib
 
 # --- headless self-test (in-process; no exe needed) --------------------------
 
@@ -923,7 +1181,14 @@ $argList = @(
     '--hold',   $HoldMs,
     '--expanded', $(if ($StartExpanded) { 1 } else { 0 }),
     '--cliphold', ($ClipHoldSeconds * 1000),
-    '--ini',    $iniPath
+    '--ini',    $iniPath,
+    '--profile', $ProfileIni,
+    '--mozalib', $mozaLib,
+    '--maxlimit', $MaxLimit,
+    '--rotpoll', $RotationPollMs,
+    '--norotation', $(if ($NoRotation) { 1 } else { 0 }),
+    '--rotdryrun', $(if ($RotationDryRun) { 1 } else { 0 }),
+    '--statefile', (Join-Path $PSScriptRoot 'rotation-watcher-state.json')
 )
 if ($TestPid) { $argList += @('--testpid', $TestPid) }
 
