@@ -61,8 +61,9 @@ param(
     [int]$ClipHoldSeconds = 4,
 
     # --- MOZA wheel rotation ------------------------------------------------
-    # Profile Controller.ini AMS writes the car's rotation into.
-    [string]$ProfileIni = 'C:\Users\acorn\OneDrive\Documents\Automobilista\userdata\Orregoso\Controller.ini',
+    # Profile Controller.ini AMS writes the car's rotation into. Left empty it
+    # is found under Documents\Automobilista\userdata (see Resolve-AmsProfileIni).
+    [string]$ProfileIni,
 
     # Folder holding MOZA_API_CSharp.dll, MOZA_API_C.dll and MOZA_SDK.dll.
     [string]$MozaLib,
@@ -1189,6 +1190,21 @@ public static class RfMain {
 '@
 
 $iniPath = $IniPath
+
+# Documents is often redirected (OneDrive here), so ask Windows rather than
+# assuming C:\Users\<you>\Documents. Picks the most recently used profile when
+# there is more than one.
+function Resolve-AmsProfileIni {
+    $ud = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Automobilista\userdata'
+    if (-not (Test-Path $ud)) { return '' }
+    $p = Get-ChildItem $ud -Directory -ErrorAction SilentlyContinue |
+         Where-Object { Test-Path (Join-Path $_.FullName 'Controller.ini') } |
+         Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($p) { return (Join-Path $p.FullName 'Controller.ini') }
+    return ''
+}
+if (-not $ProfileIni) { $ProfileIni = Resolve-AmsProfileIni }
+
 if (-not $MozaLib) { $MozaLib = Join-Path $PSScriptRoot 'lib\moza' }
 $mozaLib = $MozaLib
 

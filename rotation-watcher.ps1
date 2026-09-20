@@ -30,7 +30,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$ProfileIni = 'C:\Users\acorn\OneDrive\Documents\Automobilista\userdata\Orregoso\Controller.ini',
+    [string]$ProfileIni,
     [string]$LibPath,
 
     [switch]$Probe,
@@ -38,6 +38,20 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Documents is often redirected (OneDrive), so ask Windows rather than assuming
+# C:\Users\<you>\Documents. Picks the most recently used profile.
+function Resolve-AmsProfileIni {
+    $ud = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Automobilista\userdata'
+    if (-not (Test-Path $ud)) { return '' }
+    $p = Get-ChildItem $ud -Directory -ErrorAction SilentlyContinue |
+         Where-Object { Test-Path (Join-Path $_.FullName 'Controller.ini') } |
+         Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($p) { return (Join-Path $p.FullName 'Controller.ini') }
+    return ''
+}
+if (-not $ProfileIni) { $ProfileIni = Resolve-AmsProfileIni }
+
 if (-not $LibPath) { $LibPath = Join-Path $PSScriptRoot 'lib\moza' }
 $StateFile = Join-Path $PSScriptRoot 'rotation-watcher-state.json'
 $LogFile   = Join-Path $PSScriptRoot 'rotation-watcher.log'
