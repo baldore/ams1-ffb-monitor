@@ -85,11 +85,23 @@ Va integrado en el overlay: una sola aplicacion. Muestra dos filas nuevas,
 `Car rotation` (lo que pide el coche) y `Base rotation` (gameMaximumAngle /
 limitAngle de la base), y pone la base a lo que pide el coche.
 
-El valor sale de `Steering Wheel Range` del `Controller.ini` del PERFIL: es lo
-que calcula el propio juego para el coche actual, ya en grados tope a tope, y
-lo reescribe en vivo al cambiar de coche (visto 540 -> 450). Ese fichero se
-reescribe cada pocos segundos con el mismo contenido, asi que se dispara por
-CAMBIO DE VALOR, nunca por fecha.
+El valor sale del SETUP en vivo, `tempGarage.svm`, junto al Controller.ini del
+perfil:
+
+    [CONTROLS]
+    SteeringRotationSetting=2//380.0 deg
+
+El juego resuelve los grados dentro del propio comentario, asi que no hay que
+mantener ninguna tabla de indices. Un `//` delante significa que la linea es
+un valor por defecto inactivo; entonces se usa el del coche.
+
+Comprobado el 2026-09-20: poner 380 en el setup NO mueve `Steering Wheel Range`
+del `Controller.ini`, que se queda en el valor del coche (450). Por eso ese
+fichero solo vale de respaldo. La pantalla dice de donde sale el numero,
+`(setup)` o `(car)`.
+
+Se dispara por CAMBIO DE VALOR: los dos ficheros se reescriben cada pocos
+segundos con el mismo contenido.
 
 Necesita las DLL del SDK de MOZA en `lib\moza\` (no se versionan, el zip no
 trae licencia): `MOZA_API_CSharp.dll`, `MOZA_API_C.dll`, `MOZA_SDK.dll`, de

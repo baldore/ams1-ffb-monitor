@@ -67,6 +67,10 @@ param(
     # Folder holding MOZA_API_CSharp.dll, MOZA_API_C.dll and MOZA_SDK.dll.
     [string]$MozaLib,
 
+    # Live garage setup. Its SteeringRotationSetting is what actually decides
+    # the wheel rotation; Controller.ini only carries the car's default.
+    [string]$SetupFile,
+
     # limitAngle is raised to this once so per-car values are never clamped.
     [int]$MaxLimit = 2000,
     [int]$RotationPollMs = 1000,
@@ -427,7 +431,7 @@ public class RfRotation {
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     static extern bool SetDllDirectoryW(string p);
 
-    readonly string iniPath, libPath, statePath;
+    readonly string iniPath, libPath, statePath, setupPath;
     readonly int    maxLimit, pollMs;
     readonly bool   dryRun;
 
@@ -443,14 +447,16 @@ public class RfRotation {
     bool   connected = false;
     int    baseLimit = 0, baseGameMax = 0, carRange = 0;
     string status = "starting";
+    string carSource = "";
 
-    public RfRotation(string iniPath, string libPath, int maxLimit, int pollMs, bool dryRun, string statePath) {
+    public RfRotation(string iniPath, string libPath, int maxLimit, int pollMs, bool dryRun, string statePath, string setupPath) {
         this.iniPath   = iniPath;
         this.libPath   = libPath;
         this.maxLimit  = maxLimit;
         this.pollMs    = pollMs;
         this.dryRun    = dryRun;
         this.statePath = statePath;
+        this.setupPath = setupPath;
     }
 
     // Record what the base looked like before we touched it, once, so
@@ -464,8 +470,8 @@ public class RfRotation {
         } catch { }
     }
 
-    public void Snapshot(out bool conn, out int limit, out int gameMax, out int car, out string st) {
-        lock (gate) { conn = connected; limit = baseLimit; gameMax = baseGameMax; car = carRange; st = status; }
+    public void Snapshot(out bool conn, out int limit, out int gameMax, out int car, out string st, out string src) {
+        lock (gate) { conn = connected; limit = baseLimit; gameMax = baseGameMax; car = carRange; st = status; src = carSource; }
     }
     void SetStatus(string s) { lock (gate) { status = s; } }
 
@@ -542,6 +548,9 @@ public class RfRotation {
         return false;
     }
 
+    // The car's default rotation, as the game computes it. Does NOT follow the
+    // garage setup - verified 2026-09-20: setting 380 in the setup left this
+    // at 450.
     public static int ReadCarRange(string path) {
         try {
             if (!File.Exists(path)) return 0;
@@ -555,6 +564,42 @@ public class RfRotation {
             }
         } catch { }
         return 0;
+    }
+
+    // The live garage setup, which is what actually decides the wheel rotation:
+    //
+    //   [CONTROLS]
+    //   SteeringRotationSetting=2//380.0 deg
+    //
+    // The game resolves the degrees into the comment, so there is no index
+    // table to maintain. A leading "//" means the line is an inactive default,
+    // in which case the car value applies instead.
+    static readonly Regex SetupRot =
+        new Regex(@"^SteeringRotationSetting=\d+//([0-9]+(?:\.[0-9]+)?)", RegexOptions.Compiled);
+
+    public static int ReadSetupRotation(string path) {
+        try {
+            if (path.Length == 0 || !File.Exists(path)) return 0;
+            foreach (string raw in File.ReadAllLines(path)) {
+                Match m = SetupRot.Match(raw.Trim());
+                if (!m.Success) continue;
+                double d;
+                if (double.TryParse(m.Groups[1].Value,
+                        System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out d))
+                    return (int)Math.Round(d);
+                return 0;
+            }
+        } catch { }
+        return 0;
+    }
+
+    // Setup wins when it has an active value; otherwise the car default.
+    int ReadDesired(out string source) {
+        int s = ReadSetupRotation(setupPath);
+        if (s > 0) { source = "setup"; return s; }
+        source = "car";
+        return ReadCarRange(iniPath);
     }
 
     void Run() {
@@ -587,8 +632,9 @@ public class RfRotation {
         int applied = -1;
         while (!stopping) {
             bool amsUp = Process.GetProcessesByName("AMS").Length > 0;
-            int range = ReadCarRange(iniPath);
-            lock (gate) { carRange = range; }
+            string src;
+            int range = ReadDesired(out src);
+            lock (gate) { carRange = range; carSource = src; }
 
             if (amsUp && range > 0 && range != applied) {
                 int target = Math.Min(range, limit);
@@ -962,11 +1008,13 @@ public class RfOverlay : Form {
     // to. They should converge a second or so after a car change.
     void AppendRotation(StringBuilder sb) {
         if (rotation == null) return;
-        bool conn; int limit, gameMax, car; string st;
-        rotation.Snapshot(out conn, out limit, out gameMax, out car, out st);
+        bool conn; int limit, gameMax, car; string st, src;
+        rotation.Snapshot(out conn, out limit, out gameMax, out car, out st, out src);
 
         sb.AppendLine(new string('-', 32));
-        sb.AppendLine(Row("Car rotation", car > 0 ? car + " deg" : "-"));
+        // Say where the number came from: the garage setup overrides the car
+        // default, and knowing which is in play saves a lot of confusion.
+        sb.AppendLine(Row("Wheel rotation", car > 0 ? car + " deg (" + src + ")" : "-"));
         if (conn) {
             sb.AppendLine(Row("Base rotation", gameMax + " / " + limit));
             // Free-form and often longer than Row's 12 character value column,
@@ -1079,12 +1127,13 @@ public static class RfMain {
         int    norot   = ArgInt(args, "--norotation", 0);
         int    rotdry  = ArgInt(args, "--rotdryrun", 0);
         string statef  = ArgStr(args, "--statefile", "");
+        string setupf  = ArgStr(args, "--setup", "");
 
         // Rotation is optional: without a profile or the SDK the overlay is
         // still a working FFB monitor, just without the two rotation rows.
         RfRotation rot = null;
         if (norot == 0 && prof.Length > 0 && mozalib.Length > 0) {
-            rot = new RfRotation(prof, mozalib, maxlim, rotpoll, rotdry != 0, statef);
+            rot = new RfRotation(prof, mozalib, maxlim, rotpoll, rotdry != 0, statef, setupf);
             rot.Start();
         }
 
@@ -1110,6 +1159,11 @@ public static class RfMain {
 $iniPath = $IniPath
 if (-not $MozaLib) { $MozaLib = Join-Path $PSScriptRoot 'lib\moza' }
 $mozaLib = $MozaLib
+
+# The live garage setup sits beside the profile Controller.ini and is what
+# actually sets the wheel rotation; Controller.ini only holds the car default.
+if (-not $SetupFile) { $SetupFile = Join-Path (Split-Path $ProfileIni -Parent) 'tempGarage.svm' }
+$setupFile = $SetupFile
 
 # --- headless self-test (in-process; no exe needed) --------------------------
 
@@ -1188,7 +1242,8 @@ $argList = @(
     '--rotpoll', $RotationPollMs,
     '--norotation', $(if ($NoRotation) { 1 } else { 0 }),
     '--rotdryrun', $(if ($RotationDryRun) { 1 } else { 0 }),
-    '--statefile', (Join-Path $PSScriptRoot 'rotation-watcher-state.json')
+    '--statefile', (Join-Path $PSScriptRoot 'rotation-watcher-state.json'),
+    '--setup',   $setupFile
 )
 if ($TestPid) { $argList += @('--testpid', $TestPid) }
 
