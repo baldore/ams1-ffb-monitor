@@ -4,6 +4,7 @@
 
 # Captures from tools/shoot-running.ps1
 *.png
+!docs/*.png
 
 # rotation-watcher.exe writes here
 *.log

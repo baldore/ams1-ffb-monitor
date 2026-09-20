@@ -1,159 +1,159 @@
 # AMS 1 FFB monitor
 
-Overlay para Automobilista 1 que lee la consola del plugin RealFeel y muestra
-sus valores con etiquetas, siempre la ultima linea, con MAX GAIN (pico
-retenido) y botones para mandar los atajos de RealFeel sin teclado numerico
-ni Right Ctrl.
+An overlay for **Automobilista 1** that reads the RealFeel plugin's console and
+shows its values with labels — always the latest line — plus a peak-hold MAX
+GAIN, buttons for RealFeel's hotkeys (no numpad or Right Ctrl needed), and
+automatic MOZA wheel rotation to match the car's setup.
 
-Base: MOZA R5. Juego en ventana sin bordes (Config.ini: WindowedMode=1,
-WindowBorders=0). RealFeelPlugin.ini con ConsoleEnabled=True.
+![The overlay](docs/overlay.png)
 
-## Ficheros
+Built for a **MOZA R5**, but nothing except the rotation feature is
+wheel-specific. Requires the game in borderless windowed mode
+(`Config.ini`: `WindowedMode=1`, `WindowBorders=0`) and `ConsoleEnabled=True`
+in `RealFeelPlugin.ini`.
 
-| Fichero | Que hace |
+## Files
+
+| File | What it does |
 |---|---|
-| `realfeel-overlay.ps1` | El monitor. Compila `realfeel-overlay.exe` al lado y lo lanza. |
-| `pin-realfeel-console.ps1` | Alternativa cruda: fija la consola de RealFeel encima del juego. |
-| `tools/fake-realfeel.ps1` | Consola falsa que imprime lineas como RealFeel, para probar sin el juego. |
-| `tools/shoot-running.ps1` | Captura el overlay en marcha a PNG, para revisar el layout. |
+| `realfeel-overlay.ps1` | The monitor. Compiles `realfeel-overlay.exe` beside itself and launches it. |
+| `rotation-watcher.ps1` | Maintenance only: `-Probe` reads the base, `-Restore` puts it back. |
+| `pin-realfeel-console.ps1` | Alternative: pins RealFeel's own raw console on top of the game. |
+| `tools/fake-realfeel.ps1` | A fake console that prints RealFeel-format lines, for testing without the game. |
+| `tools/shoot-running.ps1` | Captures the running overlay to a PNG, for checking layout. |
 
-El `.exe` no se versiona: se reconstruye solo cuando el `.ps1` es mas nuevo.
+The `.exe` is not versioned — it is rebuilt whenever the `.ps1` is newer.
 
-## Uso
+## Usage
 
     powershell -NoProfile -ExecutionPolicy Bypass -File realfeel-overlay.ps1
 
-Parametros: `-Corner TopRight|TopLeft|BottomRight|BottomLeft`, `-StartExpanded`,
+Options: `-Corner TopRight|TopLeft|BottomRight|BottomLeft`, `-StartExpanded`,
 `-ClipThreshold 100`, `-ClipHoldSeconds 4`, `-PollMs 100`, `-HoldMs 150`,
 `-IniPath <RealFeelPlugin.ini>`.
 
-Hay un acceso directo en el escritorio ("AMS 1 FFB monitor") que apunta aqui.
+Drag to move the window. Double-click or `R` resets the peak. `Esc` closes.
+`FFB controls [+]` expands the buttons.
 
-Arrastrar mueve la ventana. Doble clic o `R` resetea el pico. `Esc` cierra.
-`FFB controls [+]` despliega los botones.
+## Why it builds an exe
 
-## Por que un exe
+Reading another process's console requires `AttachConsole`, and a process can
+only be attached to one console at a time — so it must `FreeConsole` first.
+`powershell.exe` is a console application whose host exits the moment its
+console goes away, so a PowerShell-hosted overlay kills itself as soon as it
+attaches. Compiling to a Windows-subsystem exe avoids having a console to lose.
+It is not about performance.
 
-Leer la consola de otro proceso exige `AttachConsole`, y antes `FreeConsole`.
-`powershell.exe` muere en cuanto pierde su consola, asi que el overlay se
-compila como aplicacion Windows (sin consola). No es por rendimiento.
+## What MAX GAIN measures
 
-## Que mide MAX GAIN
+`Force (output) / MaxForceAtSteeringRack`, verified against the console's own
+arithmetic. This is saturation at the **RealFeel stage**, *before* `output max`,
+`FFB Gain` and Pit House. So 78% does **not** mean the wheelbase has headroom,
+and changing Pit House strength will not move this number. It is the only stage
+measurable from outside — no MOZA API exposes actual torque.
 
-`Force (output) / MaxForceAtSteeringRack`, verificado con la aritmetica de la
-propia consola. Es la saturacion de la etapa RealFeel, ANTES de `output max`,
-`FFB Gain` y Pit House. Un 78% no dice que la base tenga margen; un cambio de
-Pit House no mueve este numero. Es la unica etapa que se puede medir desde
-fuera; ninguna API de MOZA expone el par real.
+When a sample reaches the threshold (`-ClipThreshold`, default 100) the peak
+freezes on screen for `-ClipHoldSeconds` and is then cleared, so you can sweep a
+whole lap and find every clipping point instead of only the first. `clip events`
+counts rising edges — one long slide counts once, even if the hold expires and
+re-arms during it. `samples` is the raw count of samples at the threshold.
 
-Al llegar al umbral (`-ClipThreshold`, 100 por defecto) el pico se congela en
-pantalla `-ClipHoldSeconds` segundos y luego se borra, para poder barrer una
-vuelta entera y ver todos los puntos donde clipea, no solo el primero. El
-contador `clip events` sube en el flanco de subida: un derrape largo cuenta
-una vez aunque el hold expire y se rearme por el camino. `samples` es el
-numero bruto de muestras en el umbral.
+## Buttons (RealFeel's hotkey map)
 
-## Botones (mapa de atajos de RealFeel)
+    Ctrl + Num 7/8/9   Max force   down / reverse / up
+    Ctrl + Num 4/5/6   Damper      down / reset / up
+    Ctrl + Num 1/2/3   Mix         -10% / toggle / +10%
+    RCtrl + Num 0/.    Smoothing   down / up
 
-    Ctrl + Num 7/8/9   Max force   bajar / invertir / subir
-    Ctrl + Num 4/5/6   Damper      bajar / reset / subir
-    Ctrl + Num 1/2/3   Mix         -10% / on-off / +10%
-    RCtrl + Num 0/.    Smoothing   bajar / subir
+Right Ctrl is the fine step, Left Ctrl the coarse one. Sources contradict each
+other about the damper step sizes, so every button reports the delta it actually
+produced rather than trusting its own label.
 
-Right Ctrl = paso fino, Left Ctrl = paso grueso. Las fuentes se contradicen
-en los tamanos de paso del damper, asi que cada boton informa del delta real
-que produjo. Invertir, reset y on-off no tienen boton a proposito.
+Input is injected with `SendInput` — RealFeel reads the keyboard only through
+`GetKeyState`, and `PostMessage` does not update the state that reads. The
+overlay has `WS_EX_NOACTIVATE`, which is what makes this possible: clicking its
+buttons does not take focus away from the game. It only sends when AMS is in the
+foreground and telemetry is present, since the hotkeys work on track only.
 
-Se inyecta con `SendInput` (RealFeel solo usa `GetKeyState`; `PostMessage`
-no sirve). El overlay tiene `WS_EX_NOACTIVATE`, por eso pulsar sus botones no
-le quita el foco al juego. Solo envia si AMS esta en primer plano y hay
-telemetria (los atajos solo funcionan en pista).
+**Unverified in the real game:** whether `GetKeyState` inside the plugin sees
+injected input. Everything else here is tested against `tools/fake-realfeel.ps1`.
 
-**Sin verificar en el juego real**: que `GetKeyState` dentro del plugin vea la
-entrada inyectada. Todo lo demas esta probado contra `tools/fake-realfeel.ps1`.
-
-## Probar sin el juego
+## Testing without the game
 
     powershell -NoProfile -ExecutionPolicy Bypass -File tools\fake-realfeel.ps1
-    powershell -NoProfile -ExecutionPolicy Bypass -File realfeel-overlay.ps1 -SelfTest -TestPid <pid del fake>
+    powershell -NoProfile -ExecutionPolicy Bypass -File realfeel-overlay.ps1 -SelfTest -TestPid <fake pid>
 
-`-SelfTest` lee cinco muestras, las parsea e imprime, sin construir el exe.
+`-SelfTest` reads five samples, parses them and prints the result, without
+building the exe.
 
-## Rotacion de la MOZA segun el coche
+## MOZA rotation, per car setup
 
-Va integrado en el overlay: una sola aplicacion. Muestra dos filas nuevas,
-`Car rotation` (lo que pide el coche) y `Base rotation` (gameMaximumAngle /
-limitAngle de la base), y pone la base a lo que pide el coche.
+Built into the overlay — one application. It adds two rows, `Wheel rotation`
+(what the car wants) and `Base rotation` (the wheelbase's own setting), and
+writes the car's rotation to the base.
 
-El valor sale del SETUP en vivo, `tempGarage.svm`, junto al Controller.ini del
-perfil:
+The value comes from the **live setup**, `tempGarage.svm`, next to the profile's
+`Controller.ini`:
 
     [CONTROLS]
     SteeringRotationSetting=2//380.0 deg
 
-El juego resuelve los grados dentro del propio comentario, asi que no hay que
-mantener ninguna tabla de indices. Un `//` delante significa que ese es el
-valor por defecto del coche, pero la linea SIGUE llevando los grados buenos y
-hay que leerla igual.
+The game resolves the degrees into the comment itself, so there is no index
+table to maintain. A leading `//` means that is the car's default — but the line
+still carries the correct degrees and must be read all the same.
 
-Tomarla por "nada puesto" era justo el fallo de "a veces no coge el ultimo
-valor": al elegir el valor por defecto el juego comenta la linea, se caia al
-Controller.ini, y ese va SIEMPRE un cambio por detras. Medido el 2026-09-20:
+Treating a commented line as "nothing set" was the cause of "sometimes it
+doesn't pick up the latest value": choosing the default makes the game comment
+the line out, which fell back to `Controller.ini` — and that file is **always
+one change behind**. Measured 2026-09-20:
 
-    06:46:47  setup 430 (explicito)   ini 450   <- el anterior
-    06:46:53  setup 380 (explicito)   ini 430   <- el anterior
-    06:47:00  setup 450 (defecto)     ini 380   <- el anterior
+    06:46:47  setup 430 (explicit)   ini 450   <- the previous value
+    06:46:53  setup 380 (explicit)   ini 430   <- the previous value
+    06:47:00  setup 450 (default)    ini 380   <- the previous value
 
-Asi que manda el setup, comentado o no. El Controller.ini solo se usa si no
-hay linea de rotacion, y la pantalla dice `(setup)`, `(default)` o `(car)`.
+So the setup wins, commented or not. `Controller.ini` is only a fallback when
+there is no rotation line at all, and the row says where the number came from:
+`(setup)`, `(default)` or `(car)`. It triggers on the **value** changing, never
+on the timestamp — both files are rewritten every few seconds with identical
+contents.
 
-Comprobado el 2026-09-20: poner 380 en el setup NO mueve `Steering Wheel Range`
-del `Controller.ini`, que se queda en el valor del coche (450). Por eso ese
-fichero solo vale de respaldo. La pantalla dice de donde sale el numero,
-`(setup)` o `(car)`.
+### The SDK
 
-Se dispara por CAMBIO DE VALOR: los dos ficheros se reescriben cada pocos
-segundos con el mismo contenido.
+Needs the MOZA SDK DLLs in `lib\moza\` — not versioned here, as the zip ships no
+licence: `MOZA_API_CSharp.dll`, `MOZA_API_C.dll`, `MOZA_SDK.dll`, from
+`SDK_CSharp\x64\` inside `MOZA_SDK.zip`
+([mozaracing.com/pages/sdk](https://mozaracing.com/pages/sdk), ~54 MB).
 
-Necesita las DLL del SDK de MOZA en `lib\moza\` (no se versionan, el zip no
-trae licencia): `MOZA_API_CSharp.dll`, `MOZA_API_C.dll`, `MOZA_SDK.dll`, de
-`SDK_CSharp\x64\` dentro de `MOZA_SDK.zip` (mozaracing.com/pages/sdk ->
-cdn.gudsen.vip, 54,5 MB).
-
-El SDK se llama por REFLEXION a proposito: con una referencia en tiempo de
-compilacion, faltar una DLL tumbaria la compilacion del overlay entero y se
-perderia el monitor de FFB por un extra opcional. Si faltan, la rotacion se
-desactiva y se ve el motivo en pantalla.
+The SDK is called by **reflection** on purpose: with a compile-time reference, a
+missing DLL would fail the entire overlay's build and you would lose the FFB
+monitor over an optional extra. If the DLLs are absent, rotation simply turns
+itself off and says why on screen.
 
     setMotorLimitAngle(limitAngle, gameMaximumAngle)
 
-MOZA documenta `gameMaximumAngle` como 90-limitAngle, dando a entender que
-puede ser menor. En la R5 NO: los dos tienen que ser IGUALES. Medido el
-2026-09-20, todo par distinto se rechaza con OUTOFRANGE:
+MOZA documents `gameMaximumAngle` as `90-limitAngle`, implying it may be lower.
+On the R5 it may **not** — the two must be **equal**. Measured 2026-09-20, every
+mismatched pair is rejected with `OUTOFRANGE`:
 
     set(1100, 380) -> OUTOFRANGE      set(1100,1100) -> NORMAL
     set( 900, 380) -> OUTOFRANGE      set( 540, 540) -> NORMAL
     set(1080, 540) -> OUTOFRANGE
     set(2000, 380) -> OUTOFRANGE
 
-Asi que no hay techo que levantar: se escribe la rotacion deseada en los dos,
-`setMotorLimitAngle(N, N)`, con tope en `-MaxLimit` (1080). El estado original
-se guarda en `rotation-watcher-state.json` al conectar la primera vez y se
-devuelve al cerrar el juego y al cerrar el overlay.
+So there is no ceiling to raise: the wanted rotation is written into both,
+`setMotorLimitAngle(N, N)`, capped at `-MaxLimit` (1080). The original state is
+saved to `rotation-watcher-state.json` on first connect and restored when the
+game closes and when the overlay closes.
 
-La base pasa por tres estados al conectar: `NODEVICES`, luego `NORMAL` con
-ceros, y por fin `NORMAL` con el valor bueno. El intermedio miente, asi que
-solo se acepta una lectura de 90 grados o mas (el minimo que documenta el SDK).
-Tarda unos 3 segundos. Toda escritura se relee y se verifica, porque el ejemplo
-oficial de MOZA llama a `setMotorLimitAngle(150,200)`, que viola su propia
-restriccion documentada.
+The base passes through three states while connecting: `NODEVICES`, then
+`NORMAL` with zeros, and finally `NORMAL` with the real value. The middle one
+lies, so only a reading of 90 degrees or more is accepted (the SDK's own
+documented minimum). It takes about three seconds. Every write is read back and
+verified, because MOZA's own example calls `setMotorLimitAngle(150,200)` — which
+violates their documented constraint.
 
-    -RotationDryRun   muestra las filas pero no escribe nunca en la base
-    -NoRotation       desactiva la rotacion; el monitor de FFB no se entera
-    -ProfileIni       Controller.ini del perfil
-    -MozaLib          carpeta de las DLL (por defecto lib\moza)
-    -MaxLimit 1080    tope de rotacion que se escribe en la base
-
-`rotation-watcher.ps1` es solo mantenimiento: `-Probe` lee la base y el valor
-del coche, `-Restore` devuelve la base a como estaba. Vigilar ya no es cosa
-suya.
+    -RotationDryRun   show the rows but never write to the base
+    -NoRotation       disable rotation entirely; the FFB monitor is unaffected
+    -ProfileIni       the profile's Controller.ini (found automatically)
+    -MozaLib          folder holding the DLLs (default lib\moza)
+    -MaxLimit 1080    cap on the rotation written to the base

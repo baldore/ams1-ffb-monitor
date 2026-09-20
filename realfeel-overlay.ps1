@@ -616,42 +616,58 @@ public class RfRotation {
         return ReadCarRange(iniPath);
     }
 
+    // limitAngle and gameMaximumAngle must be EQUAL on this base. MOZA
+    // documents gameMaximumAngle as 90-limitAngle, implying it can be lower,
+    // but every mismatched pair is rejected with OUTOFRANGE (measured on the
+    // R5: 1100/380, 900/380, 1080/540 and 2000/380 all failed; 1100/1100 and
+    // 540/540 succeeded). So there is no ceiling to raise - just write the
+    // wanted rotation into both.
     void Run() {
-        if (!LoadSdk()) return;
-
-        try { miInstall.Invoke(null, null); } catch (Exception ex) { SetStatus("install failed: " + ex.GetType().Name); return; }
-
-        SetStatus("connecting");
-        int limit = 0, gameMax = 0;
-        DateTime deadline = DateTime.UtcNow.AddSeconds(30);
-        while (!stopping && DateTime.UtcNow < deadline) {
-            if (TryRead(out limit, out gameMax)) break;
-            Thread.Sleep(500);
+        bool sdkOk = LoadSdk();
+        if (sdkOk) {
+            try { miInstall.Invoke(null, null); }
+            catch (Exception ex) { SetStatus("install failed: " + ex.GetType().Name); sdkOk = false; }
         }
-        if (stopping) return;
-        if (limit < 90) { SetStatus("base not found"); return; }
+        if (sdkOk) SetStatus("connecting");
 
-        lock (gate) { connected = true; baseLimit = limit; baseGameMax = gameMax; origLimit = limit; origGameMax = gameMax; }
-        SaveOriginal(limit, gameMax);
-        SetStatus(dryRun ? "dry run" : "ready");
-
-        // limitAngle and gameMaximumAngle must be EQUAL on this base. MOZA
-        // documents gameMaximumAngle as 90-limitAngle, implying it can be
-        // lower, but every mismatched pair is rejected with OUTOFRANGE
-        // (measured on the R5: 1100/380, 900/380, 1080/540 and 2000/380 all
-        // failed; 1100/1100 and 540/540 succeeded). So there is no ceiling to
-        // raise - just write the wanted rotation into both.
-        int applied = -1;
-        bool wasUp = false;
+        int      applied = -1;
+        bool     wasUp = false;
+        DateTime nextTry = DateTime.UtcNow;
 
         try {
             while (!stopping) {
-                bool amsUp = Process.GetProcessesByName("AMS").Length > 0;
+                // Read the wanted rotation every tick, connected or not: it
+                // comes from a file and needs no hardware, so there is no
+                // reason to hide it while the base is unreachable.
                 string src;
                 int range = ReadDesired(out src);
                 lock (gate) { carRange = range; carSource = src; }
 
-                if (amsUp && range > 0 && range != applied) {
+                bool conn;
+                lock (gate) { conn = connected; }
+
+                // Keep retrying rather than giving up after one window - the
+                // base may be switched on long after the overlay starts.
+                if (sdkOk && !conn && DateTime.UtcNow >= nextTry) {
+                    int l, g;
+                    if (TryRead(out l, out g)) {
+                        lock (gate) {
+                            connected = true;
+                            baseLimit = l; baseGameMax = g;
+                            origLimit = l; origGameMax = g;
+                        }
+                        SaveOriginal(l, g);
+                        SetStatus(dryRun ? "dry run" : "ready");
+                        conn = true;
+                    } else {
+                        nextTry = DateTime.UtcNow.AddSeconds(2);
+                        SetStatus("base not responding");
+                    }
+                }
+
+                bool amsUp = Process.GetProcessesByName("AMS").Length > 0;
+
+                if (conn && amsUp && range > 0 && range != applied) {
                     int target = Math.Min(range, maxLimit);
                     if (target < 90) target = 90;
                     if (dryRun) {
