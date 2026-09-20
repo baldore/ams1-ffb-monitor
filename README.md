@@ -24,7 +24,8 @@ El `.exe` no se versiona: se reconstruye solo cuando el `.ps1` es mas nuevo.
     powershell -NoProfile -ExecutionPolicy Bypass -File realfeel-overlay.ps1
 
 Parametros: `-Corner TopRight|TopLeft|BottomRight|BottomLeft`, `-StartExpanded`,
-`-ClipThreshold 100`, `-PollMs 100`, `-HoldMs 150`, `-IniPath <RealFeelPlugin.ini>`.
+`-ClipThreshold 100`, `-ClipHoldSeconds 4`, `-PollMs 100`, `-HoldMs 150`,
+`-IniPath <RealFeelPlugin.ini>`.
 
 Hay un acceso directo en el escritorio ("AMS 1 FFB monitor") que apunta aqui.
 
@@ -44,6 +45,13 @@ propia consola. Es la saturacion de la etapa RealFeel, ANTES de `output max`,
 `FFB Gain` y Pit House. Un 78% no dice que la base tenga margen; un cambio de
 Pit House no mueve este numero. Es la unica etapa que se puede medir desde
 fuera; ninguna API de MOZA expone el par real.
+
+Al llegar al umbral (`-ClipThreshold`, 100 por defecto) el pico se congela en
+pantalla `-ClipHoldSeconds` segundos y luego se borra, para poder barrer una
+vuelta entera y ver todos los puntos donde clipea, no solo el primero. El
+contador `clip events` sube en el flanco de subida: un derrape largo cuenta
+una vez aunque el hold expire y se rearme por el camino. `samples` es el
+numero bruto de muestras en el umbral.
 
 ## Botones (mapa de atajos de RealFeel)
 

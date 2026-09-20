@@ -56,6 +56,10 @@ param(
     [int]$ClipThreshold = 100,
     [int]$PollMs = 100,
 
+    # Seconds to keep a clipping peak on screen before clearing it, so a lap
+    # can be swept for every clipping point rather than only the first.
+    [int]$ClipHoldSeconds = 4,
+
     # How long a probed key is held down. RealFeel polls with GetKeyState
     # roughly every 100ms, so the key must stay down longer than that or the
     # poll can miss it entirely.
@@ -398,11 +402,22 @@ public class RfOverlay : Form {
     readonly int clipThreshold;
     readonly int testPid;
     readonly int holdMs;
+    readonly int clipHoldMs;
     Dictionary<int, string> carsByForce = new Dictionary<int, string>();
 
     int  peakPct = 0;
     int  peakForce = 0;
     long clipSamples = 0;
+
+    // Clip hold: once a sample reaches the threshold the peak is frozen on
+    // screen for a few seconds and then cleared, so a lap can be swept for
+    // every clipping point instead of showing only the first one. The event
+    // counter ticks on the rising edge, so one long slide counts once even
+    // though the hold may expire and re-arm during it.
+    int      clipEvents = 0;
+    bool     holding = false;
+    bool     wasClipping = false;
+    DateTime holdUntil = DateTime.MinValue;
     string vehicle = null;
     bool justAttached = false;
 
@@ -434,10 +449,11 @@ public class RfOverlay : Form {
         }
     }
 
-    public RfOverlay(int clipThreshold, int pollMs, int testPid, string iniPath, int holdMs, bool startExpanded) {
+    public RfOverlay(int clipThreshold, int pollMs, int testPid, string iniPath, int holdMs, bool startExpanded, int clipHoldMs) {
         this.clipThreshold = clipThreshold;
         this.testPid = testPid;
         this.holdMs = holdMs;
+        this.clipHoldMs = clipHoldMs;
         try { carsByForce = RfParser.CarsByForce(iniPath); } catch { }
 
         FormBorderStyle = FormBorderStyle.None;
@@ -505,7 +521,9 @@ public class RfOverlay : Form {
         body.Location  = new Point(12, 30);
         body.Size      = new Size(396, 240);
 
-        peak.Font      = new Font("Consolas", 17f, FontStyle.Bold);
+        // 15pt, not 17: with the HOLD countdown appended the line reaches 33
+        // characters, which wrapped into the status text at the larger size.
+        peak.Font      = new Font("Consolas", 15f, FontStyle.Bold);
         peak.ForeColor = Color.LimeGreen;
         peak.AutoSize  = false;
         peak.Location  = new Point(12, 274);
@@ -560,7 +578,10 @@ public class RfOverlay : Form {
     }
     void OnDragEnd(object s, MouseEventArgs e) { dragging = false; }
 
-    public void ResetPeak() { peakPct = 0; peakForce = 0; clipSamples = 0; }
+    public void ResetPeak() {
+        peakPct = 0; peakForce = 0; clipSamples = 0;
+        clipEvents = 0; holding = false; wasClipping = false;
+    }
 
     Button MakeButton(string text, int x, int y, int w) {
         var b = new Button();
@@ -691,10 +712,25 @@ public class RfOverlay : Form {
             if (probeTicksLeft == 0) EvaluateProbe(s);
         }
 
-        int absOut = Math.Abs(s.ForceOut);
+        int  absOut     = Math.Abs(s.ForceOut);
+        bool isClipping = (s.OutPct >= clipThreshold) || s.Saturated;
+
+        // Expire a finished hold BEFORE this sample is folded in, so the new
+        // excursion starts from a clean peak rather than inheriting the old one.
+        if (holding && DateTime.UtcNow >= holdUntil) {
+            peakPct = 0; peakForce = 0; holding = false;
+        }
+
         if (s.OutPct > peakPct)  peakPct = s.OutPct;
         if (absOut  > peakForce) peakForce = absOut;
-        if (s.OutPct >= clipThreshold || s.Saturated) clipSamples++;
+        if (isClipping) clipSamples++;
+
+        if (isClipping && !wasClipping) clipEvents++;   // rising edge only
+        if (isClipping) {
+            holding   = true;
+            holdUntil = DateTime.UtcNow.AddMilliseconds(clipHoldMs);
+        }
+        wasClipping = isClipping;
 
         Render(s, null);
     }
@@ -740,18 +776,27 @@ public class RfOverlay : Form {
         sb.AppendLine(Row("Force (output)",    s.ForceOut.ToString()));
         sb.AppendLine(Row("Output now",        s.OutPct + "%" + (s.Saturated ? " +++" : "")));
         sb.AppendLine(new string('-', 32));
-        sb.AppendLine(Row("Front grip L / R",  s.GripL.ToString("0.00") + " / " + s.GripR.ToString("0.00")));
-        sb.AppendLine(Row("Front grip effect", s.GripEffect.ToString("0.0")));
+        // Invariant so the readout matches the dots the game's console prints,
+        // rather than switching to commas on a Spanish system.
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        sb.AppendLine(Row("Front grip L / R",  s.GripL.ToString("0.00", ci) + " / " + s.GripR.ToString("0.00", ci)));
+        sb.AppendLine(Row("Front grip effect", s.GripEffect.ToString("0.0", ci)));
         body.Text = sb.ToString();
 
-        peak.Text = string.Format("MAX GAIN  {0,3}%   ({1})", peakPct, peakForce);
+        string held = "";
+        if (holding) {
+            double left = (holdUntil - DateTime.UtcNow).TotalSeconds;
+            if (left < 0) left = 0;
+            held = string.Format(System.Globalization.CultureInfo.InvariantCulture, "  HOLD {0:0.0}s", left);
+        }
+        peak.Text = string.Format("MAX GAIN  {0,3}%  ({1}){2}", peakPct, peakForce, held);
         if (peakPct >= clipThreshold) peak.ForeColor = Color.Tomato;
         else if (peakPct >= 85)       peak.ForeColor = Color.Gold;
         else                          peak.ForeColor = Color.LimeGreen;
 
         status.Text = string.Format(
-            "clipped samples: {0}\ndouble-click or R resets peak\nright-click for menu, Esc closes",
-            clipSamples);
+            "clip events: {0}   samples: {1}\ndouble-click or R resets peak\nright-click for menu, Esc closes",
+            clipEvents, clipSamples);
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e) {
@@ -783,11 +828,12 @@ public static class RfMain {
         int    margin = ArgInt(args, "--margin", 12);
         int    hold   = ArgInt(args, "--hold", 150);
         int    expand = ArgInt(args, "--expanded", 0);
+        int    cliphold = ArgInt(args, "--cliphold", 4000);
         string corner = ArgStr(args, "--corner", "TopRight");
         string ini    = ArgStr(args, "--ini", "");
 
         Application.EnableVisualStyles();
-        var f = new RfOverlay(clip, poll, tpid, ini, hold, expand != 0);
+        var f = new RfOverlay(clip, poll, tpid, ini, hold, expand != 0, cliphold);
 
         var area = Screen.PrimaryScreen.WorkingArea;
         int x, y;
@@ -876,6 +922,7 @@ $argList = @(
     '--poll',   $PollMs,
     '--hold',   $HoldMs,
     '--expanded', $(if ($StartExpanded) { 1 } else { 0 }),
+    '--cliphold', ($ClipHoldSeconds * 1000),
     '--ini',    $iniPath
 )
 if ($TestPid) { $argList += @('--testpid', $TestPid) }
