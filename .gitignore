@@ -10,3 +10,6 @@
 
 # MOZA SDK binaries (no licence shipped with the SDK; see README for the source)
 lib/
+
+# Machine-specific: the base settings recorded for -Restore
+rotation-watcher-state.json

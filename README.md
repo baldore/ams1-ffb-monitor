@@ -78,3 +78,40 @@ entrada inyectada. Todo lo demas esta probado contra `tools/fake-realfeel.ps1`.
     powershell -NoProfile -ExecutionPolicy Bypass -File realfeel-overlay.ps1 -SelfTest -TestPid <pid del fake>
 
 `-SelfTest` lee cinco muestras, las parsea e imprime, sin construir el exe.
+
+## rotation-watcher.ps1 (rotacion automatica de la MOZA)
+
+Pone el rango de giro de la base al del coche. El valor sale de
+`Steering Wheel Range` del `Controller.ini` del PERFIL: es el numero que
+calcula el propio juego para el coche actual, ya en grados tope a tope, y lo
+reescribe en vivo al cambiar de coche (visto 540 -> 450). El fichero se
+reescribe cada pocos segundos con el mismo contenido, asi que se dispara por
+CAMBIO DE VALOR, nunca por fecha de modificacion.
+
+Necesita las DLL del SDK de MOZA en `lib\moza\` (no se versionan, sin licencia
+en el zip): `MOZA_API_CSharp.dll`, `MOZA_API_C.dll`, `MOZA_SDK.dll`, de
+`SDK_CSharp\x64\` dentro de `MOZA_SDK.zip`
+(mozaracing.com/pages/sdk -> cdn.gudsen.vip, 54,5 MB).
+
+    setMotorLimitAngle(limitAngle, gameMaximumAngle)
+      limitAngle        limite de la base,  90-2000
+      gameMaximumAngle  rango del juego,    90-limitAngle
+
+Solo se toca `gameMaximumAngle`; `limitAngle` se deja como este. El ejemplo
+oficial de MOZA llama a `setMotorLimitAngle(150,200)`, que viola su propia
+restriccion documentada, asi que siempre se relee despues de escribir.
+
+    -Probe     solo lee y muestra los angulos de la base, no escribe
+    -DryRun    vigila y registra, sin escribir nunca
+
+    -Restore   devuelve la base a lo que habia antes
+
+El original se guarda una sola vez en `rotation-watcher-state.json` (no se
+versiona). `limitAngle` se sube a 2000 al arrancar para que ningun coche se
+quede recortado: con la base en 450, un coche de 540 se habria aplicado como
+450 sin avisar.
+
+La base pasa por tres estados al conectar: `NODEVICES`, luego `NORMAL` con
+ceros, y por fin `NORMAL` con el valor bueno. El estado intermedio miente, asi
+que solo se acepta una lectura de 90 grados o mas (el minimo que documenta el
+SDK). Tarda unos 3 segundos.
