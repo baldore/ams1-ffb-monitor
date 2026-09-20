@@ -114,13 +114,20 @@ perderia el monitor de FFB por un extra opcional. Si faltan, la rotacion se
 desactiva y se ve el motivo en pantalla.
 
     setMotorLimitAngle(limitAngle, gameMaximumAngle)
-      limitAngle        limite de la base,  90-2000
-      gameMaximumAngle  rango del juego,    90-limitAngle
 
-`limitAngle` se sube una vez a `-MaxLimit` (2000) porque `gameMaximumAngle` no
-puede pasarse de el: con la base en 450, un coche de 540 se habria aplicado
-como 450 sin avisar. El original se guarda en `rotation-watcher-state.json` al
-conectar por primera vez.
+MOZA documenta `gameMaximumAngle` como 90-limitAngle, dando a entender que
+puede ser menor. En la R5 NO: los dos tienen que ser IGUALES. Medido el
+2026-09-20, todo par distinto se rechaza con OUTOFRANGE:
+
+    set(1100, 380) -> OUTOFRANGE      set(1100,1100) -> NORMAL
+    set( 900, 380) -> OUTOFRANGE      set( 540, 540) -> NORMAL
+    set(1080, 540) -> OUTOFRANGE
+    set(2000, 380) -> OUTOFRANGE
+
+Asi que no hay techo que levantar: se escribe la rotacion deseada en los dos,
+`setMotorLimitAngle(N, N)`, con tope en `-MaxLimit` (1080). El estado original
+se guarda en `rotation-watcher-state.json` al conectar la primera vez y se
+devuelve al cerrar el juego y al cerrar el overlay.
 
 La base pasa por tres estados al conectar: `NODEVICES`, luego `NORMAL` con
 ceros, y por fin `NORMAL` con el valor bueno. El intermedio miente, asi que
@@ -133,7 +140,7 @@ restriccion documentada.
     -NoRotation       desactiva la rotacion; el monitor de FFB no se entera
     -ProfileIni       Controller.ini del perfil
     -MozaLib          carpeta de las DLL (por defecto lib\moza)
-    -MaxLimit 2000    hasta donde se sube limitAngle
+    -MaxLimit 1080    tope de rotacion que se escribe en la base
 
 `rotation-watcher.ps1` es solo mantenimiento: `-Probe` lee la base y el valor
 del coche, `-Restore` devuelve la base a como estaba. Vigilar ya no es cosa

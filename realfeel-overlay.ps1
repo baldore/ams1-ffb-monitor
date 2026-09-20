@@ -71,8 +71,8 @@ param(
     # the wheel rotation; Controller.ini only carries the car's default.
     [string]$SetupFile,
 
-    # limitAngle is raised to this once so per-car values are never clamped.
-    [int]$MaxLimit = 2000,
+    # Upper cap on the rotation actually written to the base.
+    [int]$MaxLimit = 1080,
     [int]$RotationPollMs = 1000,
 
     # Show the rotation rows but never write to the base.
@@ -448,6 +448,7 @@ public class RfRotation {
     int    baseLimit = 0, baseGameMax = 0, carRange = 0;
     string status = "starting";
     string carSource = "";
+    int    origLimit = 0, origGameMax = 0;   // put back on the way out
 
     public RfRotation(string iniPath, string libPath, int maxLimit, int pollMs, bool dryRun, string statePath, string setupPath) {
         this.iniPath   = iniPath;
@@ -480,9 +481,11 @@ public class RfRotation {
         worker.IsBackground = true;
         worker.Start();
     }
+    // Let the worker unwind: it restores the base and releases the SDK in its
+    // own finally, so both happen on the thread that owns the connection.
     public void Stop() {
         stopping = true;
-        try { if (miRemove != null) miRemove.Invoke(null, null); } catch { }
+        try { if (worker != null) worker.Join(5000); } catch { }
     }
 
     bool LoadSdk() {
@@ -617,39 +620,58 @@ public class RfRotation {
         if (stopping) return;
         if (limit < 90) { SetStatus("base not found"); return; }
 
-        lock (gate) { connected = true; baseLimit = limit; baseGameMax = gameMax; }
+        lock (gate) { connected = true; baseLimit = limit; baseGameMax = gameMax; origLimit = limit; origGameMax = gameMax; }
         SaveOriginal(limit, gameMax);
         SetStatus(dryRun ? "dry run" : "ready");
 
-        // gameMaximumAngle can never exceed limitAngle, so lift the ceiling
-        // once; a base left at 450 would clamp a 540 car silently.
-        if (limit < maxLimit) {
-            if (dryRun) { SetStatus("dry run (would raise limit)"); limit = maxLimit; }
-            else if (TryWrite(maxLimit, gameMax)) { limit = maxLimit; SetStatus("ready"); }
-            else SetStatus("limit stuck at " + limit);
-        }
-
+        // limitAngle and gameMaximumAngle must be EQUAL on this base. MOZA
+        // documents gameMaximumAngle as 90-limitAngle, implying it can be
+        // lower, but every mismatched pair is rejected with OUTOFRANGE
+        // (measured on the R5: 1100/380, 900/380, 1080/540 and 2000/380 all
+        // failed; 1100/1100 and 540/540 succeeded). So there is no ceiling to
+        // raise - just write the wanted rotation into both.
         int applied = -1;
-        while (!stopping) {
-            bool amsUp = Process.GetProcessesByName("AMS").Length > 0;
-            string src;
-            int range = ReadDesired(out src);
-            lock (gate) { carRange = range; carSource = src; }
+        bool wasUp = false;
 
-            if (amsUp && range > 0 && range != applied) {
-                int target = Math.Min(range, limit);
-                if (target < 90) target = 90;
-                if (dryRun) {
-                    SetStatus(string.Format("dry run: would set {0}", target));
-                    applied = range;
-                } else if (TryWrite(limit, target)) {
-                    SetStatus(target == range ? "ready" : "clamped to " + target);
-                    applied = range;
+        try {
+            while (!stopping) {
+                bool amsUp = Process.GetProcessesByName("AMS").Length > 0;
+                string src;
+                int range = ReadDesired(out src);
+                lock (gate) { carRange = range; carSource = src; }
+
+                if (amsUp && range > 0 && range != applied) {
+                    int target = Math.Min(range, maxLimit);
+                    if (target < 90) target = 90;
+                    if (dryRun) {
+                        SetStatus("dry run: would set " + target);
+                        applied = range;
+                    } else if (TryWrite(target, target)) {
+                        SetStatus(target == range ? "ready" : "capped at " + target);
+                        applied = range;
+                    }
                 }
+
+                // Game gone: hand the base back to whatever it was before.
+                if (wasUp && !amsUp) { RestoreOriginal(); applied = -1; }
+                wasUp = amsUp;
+
+                Thread.Sleep(pollMs);
             }
-            if (!amsUp) applied = -1;
-            Thread.Sleep(pollMs);
         }
+        finally {
+            RestoreOriginal();
+            try { if (miRemove != null) miRemove.Invoke(null, null); } catch { }
+        }
+    }
+
+    void RestoreOriginal() {
+        int ol, og;
+        lock (gate) { ol = origLimit; og = origGameMax; }
+        if (dryRun || ol < 90) return;
+        int l, g;
+        if (TryRead(out l, out g) && l == ol && g == og) { SetStatus("restored"); return; }
+        SetStatus(TryWrite(ol, og) ? "restored" : "restore failed");
     }
 }
 
@@ -1122,7 +1144,7 @@ public static class RfMain {
 
         string prof    = ArgStr(args, "--profile", "");
         string mozalib = ArgStr(args, "--mozalib", "");
-        int    maxlim  = ArgInt(args, "--maxlimit", 2000);
+        int    maxlim  = ArgInt(args, "--maxlimit", 1080);
         int    rotpoll = ArgInt(args, "--rotpoll", 1000);
         int    norot   = ArgInt(args, "--norotation", 0);
         int    rotdry  = ArgInt(args, "--rotdryrun", 0);
