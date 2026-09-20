@@ -92,8 +92,20 @@ perfil:
     SteeringRotationSetting=2//380.0 deg
 
 El juego resuelve los grados dentro del propio comentario, asi que no hay que
-mantener ninguna tabla de indices. Un `//` delante significa que la linea es
-un valor por defecto inactivo; entonces se usa el del coche.
+mantener ninguna tabla de indices. Un `//` delante significa que ese es el
+valor por defecto del coche, pero la linea SIGUE llevando los grados buenos y
+hay que leerla igual.
+
+Tomarla por "nada puesto" era justo el fallo de "a veces no coge el ultimo
+valor": al elegir el valor por defecto el juego comenta la linea, se caia al
+Controller.ini, y ese va SIEMPRE un cambio por detras. Medido el 2026-09-20:
+
+    06:46:47  setup 430 (explicito)   ini 450   <- el anterior
+    06:46:53  setup 380 (explicito)   ini 430   <- el anterior
+    06:47:00  setup 450 (defecto)     ini 380   <- el anterior
+
+Asi que manda el setup, comentado o no. El Controller.ini solo se usa si no
+hay linea de rotacion, y la pantalla dice `(setup)`, `(default)` o `(car)`.
 
 Comprobado el 2026-09-20: poner 380 en el setup NO mueve `Steering Wheel Range`
 del `Controller.ini`, que se queda en el valor del coche (450). Por eso ese

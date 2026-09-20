@@ -569,38 +569,48 @@ public class RfRotation {
         return 0;
     }
 
-    // The live garage setup, which is what actually decides the wheel rotation:
+    // The live garage setup, which is what decides the wheel rotation:
     //
     //   [CONTROLS]
-    //   SteeringRotationSetting=2//380.0 deg
+    //   SteeringRotationSetting=7//430.0 deg     explicitly chosen
+    //   //SteeringRotationSetting=9//450.0 deg   left at the default
     //
-    // The game resolves the degrees into the comment, so there is no index
-    // table to maintain. A leading "//" means the line is an inactive default,
-    // in which case the car value applies instead.
+    // The game resolves the degrees into the comment either way, so the line
+    // is worth reading whether or not it is commented out. Treating a
+    // commented line as "nothing set" was wrong: it sent us to Controller.ini,
+    // which carries a separately derived number that disagrees.
     static readonly Regex SetupRot =
-        new Regex(@"^SteeringRotationSetting=\d+//([0-9]+(?:\.[0-9]+)?)", RegexOptions.Compiled);
+        new Regex(@"^(//)?SteeringRotationSetting=\d+//([0-9]+(?:\.[0-9]+)?)", RegexOptions.Compiled);
 
-    public static int ReadSetupRotation(string path) {
+    // Returns degrees, and whether the line was an explicit choice.
+    public static int ReadSetupRotation(string path, out bool explicitChoice) {
+        explicitChoice = false;
         try {
             if (path.Length == 0 || !File.Exists(path)) return 0;
             foreach (string raw in File.ReadAllLines(path)) {
                 Match m = SetupRot.Match(raw.Trim());
                 if (!m.Success) continue;
                 double d;
-                if (double.TryParse(m.Groups[1].Value,
+                if (double.TryParse(m.Groups[2].Value,
                         System.Globalization.NumberStyles.Float,
-                        System.Globalization.CultureInfo.InvariantCulture, out d))
+                        System.Globalization.CultureInfo.InvariantCulture, out d)) {
+                    explicitChoice = !m.Groups[1].Success;
                     return (int)Math.Round(d);
+                }
                 return 0;
             }
         } catch { }
         return 0;
     }
 
-    // Setup wins when it has an active value; otherwise the car default.
+    // The setup file is the garage's own record, so it wins. Controller.ini is
+    // only a fallback for when the setup has no rotation line at all - the two
+    // are written at different moments and each lags the other in turn, so
+    // mixing them produces exactly the "latest value not picked up" symptom.
     int ReadDesired(out string source) {
-        int s = ReadSetupRotation(setupPath);
-        if (s > 0) { source = "setup"; return s; }
+        bool chosen;
+        int s = ReadSetupRotation(setupPath, out chosen);
+        if (s > 0) { source = chosen ? "setup" : "default"; return s; }
         source = "car";
         return ReadCarRange(iniPath);
     }
